@@ -1,48 +1,36 @@
 # Apex Void Bot
 
-Telegram bot with dark void aesthetic + Premium system.
+Telegram bot with Premium system + bulk email (Send Mail / Appeal).
 
 **Bot:** @Apexvoid_00bot  
-**Creator:** @Fredd091
+**Creator:** @Fredd091 (ID: 7926253634)
 
 ## Features
 
-### For Everyone
-- `/start` – Welcome + main menu
-- `/menu` – Control panel
-- Colored inline buttons (green / blue / red)
-- SMC Unicode font styling
+### Everyone
+- `/start` and `/menu`
+- Colored inline buttons + SMC font
 
-### Premium System
-- Regular users see “Premium Required” on Ban / Unban / Prem
-- Premium users can see their remaining days
-- Admin can fully manage premium
+### Premium Users
+- Can use **Send Mail** → Mass Mail
+- Can use **Appeal** → Mass Appeal
+- Get success / failure notification after sending
 
-### Admin Only (ID: 7926253634)
-- Full Premium Management panel
-- Give Premium (with duration 1-30 days)
-- Revoke Premium (with confirmation)
-- List all premium users
-- Total users + recent users
-- Admin commands:
-  - `/addprem [user_id] [days]`
-  - `/delprem [user_id]`
-  - `/listprem`
-  - `/totalusers`
+### Admin Only
+- Manage **Client Emails** (add / delete)
+- Set / edit / delete **Custom Message**
+- Manage **Appeal Emails**
+- Set / edit / delete **Appeal Message**
+- Full Premium management (give / revoke / list / total users)
+- Bot Logs
+- Commands: `/addprem`, `/delprem`, `/listprem`, `/totalusers`
 
-### Permission Levels
-- **Admin** → Full access
-- **Premium** → Can access Ban/Unban (feature placeholder) + view own premium status
-- **Regular** → Only Start / Menu + Contact Creator
+### Email Sending
+- Uses Gmail SMTP with App Passwords
+- Sender accounts are hidden from premium users
+- Tries both sender accounts automatically
 
 ## Notes
-- Storage is currently **in-memory** (resets on Vercel cold start)
-- Ban / Unban features are gated but the actual reporting logic is not implemented
-- Welcome image support is ready (set `WELCOME_IMAGE_URL` in the code if you want photos on every menu)
-
-## Deploy
-Just push to the connected Vercel project. Webhook should already be set to:
-
-```
-https://apex-void-bot.vercel.app/api/telegram-webhook
-```
+- Storage is in-memory (resets on cold start)
+- Runtime is now **Node.js** (required for nodemailer)
+- Vercel will install `nodemailer` automatically from `package.json`
