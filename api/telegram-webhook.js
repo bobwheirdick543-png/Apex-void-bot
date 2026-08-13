@@ -1,5 +1,7 @@
-// Apex Void Bot - Full Premium + Admin System
-// Vercel Edge Function
+// Apex Void Bot - Node.js Runtime (Gmail SMTP)
+// Send Mail + Appeal + Premium + Admin
+
+const nodemailer = require("nodemailer");
 
 const TOKEN = "8691945494:AAEAyCzR0YR9z1OvgKdz6nv_OXtwgeRdy6A";
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
@@ -7,22 +9,41 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 const ADMIN_ID = 7926253634;
 const CREATOR_USERNAME = "Fredd091";
 
-// Optional: public image URL for menus (leave empty to send text only)
-const WELCOME_IMAGE_URL = "";
+// Gmail accounts for sending (Admin only – never shown to users)
+const SENDER_ACCOUNTS = [
+  {
+    email: "banappealling101@gmail.com",
+    pass: "iotu nwim okyv vpzo",
+  },
+  {
+    email: "jamesakpos79@gmail.com",
+    pass: "gvrp egbz slhj mopp",
+  },
+];
 
-export const config = {
-  runtime: "edge",
+// ====================== IN-MEMORY STORAGE ======================
+const users = new Map();
+const premiumUsers = new Map();
+const userStates = new Map();
+
+// Admin-managed lists & templates
+let clientEmails = [];
+let appealEmails = [];
+let customMessage = "";
+let appealMessage = "";
+
+// Simple logs
+const logs = {
+  successfulMails: [],
+  failedMails: [],
+  successfulAppeals: [],
+  failedAppeals: [],
 };
 
-// ====================== STORAGE (In-Memory) ======================
-const users = new Map();       // userId -> { id, username, first_name, joined_at }
-const premiumUsers = new Map(); // userId -> { id, username, granted_at, duration_days, expiry }
-const userStates = new Map();  // userId -> { action, data }
-
-// ====================== UNICODE SMC FONT ======================
+// ====================== UNICODE FONT ======================
 function toSMC(text) {
   if (!text) return "";
-  const boldSans = {
+  const map = {
     A: "𝗔", B: "𝗕", C: "𝗖", D: "𝗗", E: "𝗘", F: "𝗙", G: "𝗚", H: "𝗛", I: "𝗜",
     J: "𝗝", K: "𝗞", L: "𝗟", M: "𝗠", N: "𝗡", O: "𝗢", P: "𝗣", Q: "𝗤", R: "𝗥",
     S: "𝗦", T: "𝗧", U: "𝗨", V: "𝗩", W: "𝗪", X: "𝗫", Y: "𝗬", Z: "𝗭",
@@ -30,62 +51,75 @@ function toSMC(text) {
     j: "𝗷", k: "𝗸", l: "𝗹", m: "𝗺", n: "𝗻", o: "𝗼", p: "𝗽", q: "𝗾", r: "𝗿",
     s: "𝘀", t: "𝘁", u: "𝘂", v: "𝘃", w: "𝘄", x: "𝘅", y: "𝘆", z: "𝘇",
     "0": "𝟬", "1": "𝟭", "2": "𝟮", "3": "𝟯", "4": "𝟰",
-    "5": "𝟱", "6": "𝟲", "7": "𝟳", "8": "𝟴", "9": "𝟵"
+    "5": "𝟱", "6": "𝟲", "7": "𝟳", "8": "𝟴", "9": "𝟵",
   };
-  return text.split("").map(c => boldSans[c] || c).join("");
+  return text.split("").map((c) => map[c] || c).join("");
 }
 
-// ====================== HELPERS ======================
+// ====================== TELEGRAM HELPERS ======================
+async function tg(method, body) {
+  const res = await fetch(`${TELEGRAM_API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
 async function sendMessage(chatId, text, replyMarkup = null) {
-  const body = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: "Markdown",
-  };
+  const body = { chat_id: chatId, text, parse_mode: "Markdown" };
   if (replyMarkup) body.reply_markup = replyMarkup;
-
-  const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+  return tg("sendMessage", body);
 }
 
-async function sendPhoto(chatId, photoUrl, caption, replyMarkup = null) {
-  const body = {
-    chat_id: chatId,
-    photo: photoUrl,
-    caption: caption,
-    parse_mode: "Markdown",
-  };
-  if (replyMarkup) body.reply_markup = replyMarkup;
-
-  const res = await fetch(`${TELEGRAM_API}/sendPhoto`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  return res.json();
+async function answerCallback(id, text = "") {
+  return tg("answerCallbackQuery", { callback_query_id: id, text });
 }
 
-async function answerCallback(callbackQueryId, text = "") {
-  await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      callback_query_id: callbackQueryId,
-      text: text,
-    }),
+// ====================== EMAIL SENDING ======================
+function createTransporter(account) {
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: account.email,
+      pass: account.pass.replace(/\s+/g, ""), // remove spaces from app password
+    },
   });
 }
 
+async function sendBulkEmail(toList, subject, htmlBody) {
+  if (!toList || toList.length === 0) {
+    return { success: false, error: "No recipient emails configured" };
+  }
+
+  let lastError = null;
+
+  // Try each sender account until one works
+  for (const account of SENDER_ACCOUNTS) {
+    try {
+      const transporter = createTransporter(account);
+      await transporter.sendMail({
+        from: `\"Apex Void\" <${account.email}>`,
+        to: toList.join(", "),
+        subject: subject,
+        html: htmlBody.replace(/\n/g, "<br>"),
+      });
+      return { success: true, used: account.email };
+    } catch (err) {
+      lastError = err.message || String(err);
+      console.error(`Send failed with ${account.email}:`, lastError);
+    }
+  }
+
+  return { success: false, error: lastError || "All sender accounts failed" };
+}
+
+// ====================== ROLE HELPERS ======================
 function registerUser(from) {
-  if (!from || !from.id) return;
-  const id = from.id;
-  if (!users.has(id)) {
-    users.set(id, {
-      id,
+  if (!from?.id) return;
+  if (!users.has(from.id)) {
+    users.set(from.id, {
+      id: from.id,
       username: from.username || null,
       first_name: from.first_name || "User",
       joined_at: Date.now(),
@@ -93,23 +127,23 @@ function registerUser(from) {
   }
 }
 
-function isAdmin(userId) {
-  return Number(userId) === ADMIN_ID;
+function isAdmin(id) {
+  return Number(id) === ADMIN_ID;
 }
 
-function isPremium(userId) {
-  const prem = premiumUsers.get(Number(userId));
-  if (!prem) return false;
-  if (Date.now() > prem.expiry) {
-    premiumUsers.delete(Number(userId));
+function isPremium(id) {
+  const p = premiumUsers.get(Number(id));
+  if (!p) return false;
+  if (Date.now() > p.expiry) {
+    premiumUsers.delete(Number(id));
     return false;
   }
   return true;
 }
 
-function getUserRole(userId) {
-  if (isAdmin(userId)) return "admin";
-  if (isPremium(userId)) return "premium";
+function getRole(id) {
+  if (isAdmin(id)) return "admin";
+  if (isPremium(id)) return "premium";
   return "regular";
 }
 
@@ -123,249 +157,128 @@ function formatDate(ts) {
   });
 }
 
-function daysRemaining(expiry) {
-  const diff = expiry - Date.now();
-  return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
+function daysLeft(expiry) {
+  return Math.max(0, Math.ceil((expiry - Date.now()) / 86400000));
 }
 
 // ====================== KEYBOARDS ======================
-function mainMenuKeyboard(userId) {
-  const role = getUserRole(userId);
+function mainMenu(userId) {
+  const role = getRole(userId);
+  const rows = [
+    [
+      { text: "🟢 Start", callback_data: "cmd_start", style: "success" },
+      { text: "🔵 Menu", callback_data: "cmd_menu", style: "primary" },
+    ],
+    [
+      { text: "🔴 Send Mail", callback_data: "cmd_sendmail", style: "danger" },
+      { text: "🔵 Appeal", callback_data: "cmd_appeal", style: "primary" },
+    ],
+    [{ text: "🟢 Prem", callback_data: "cmd_prem", style: "success" }],
+  ];
 
   if (role === "admin") {
-    return {
-      inline_keyboard: [
-        [
-          { text: "🟢 Start", callback_data: "cmd_start", style: "success" },
-          { text: "🔵 Menu", callback_data: "cmd_menu", style: "primary" },
-        ],
-        [
-          { text: "🔴 Ban", callback_data: "cmd_ban", style: "danger" },
-          { text: "🔵 Unban", callback_data: "cmd_unban", style: "primary" },
-        ],
-        [
-          { text: "🟢 Prem", callback_data: "cmd_prem", style: "success" },
-          { text: "📊 Bot Logs", callback_data: "admin_logs", style: "primary" },
-        ],
-      ],
-    };
+    rows.push([{ text: "📊 Bot Logs", callback_data: "admin_logs", style: "primary" }]);
   }
 
-  // Premium + Regular
-  return {
-    inline_keyboard: [
-      [
-        { text: "🟢 Start", callback_data: "cmd_start", style: "success" },
-        { text: "🔵 Menu", callback_data: "cmd_menu", style: "primary" },
-      ],
-      [
-        { text: "🔴 Ban", callback_data: "cmd_ban", style: "danger" },
-        { text: "🔵 Unban", callback_data: "cmd_unban", style: "primary" },
-      ],
-      [
-        { text: "🟢 Prem", callback_data: "cmd_prem", style: "success" },
-      ],
-    ],
-  };
+  return { inline_keyboard: rows };
 }
 
-function premiumMenuKeyboard() {
+function sendMailMenu(isAdminUser) {
+  const rows = [
+    [{ text: "🔴 Mass Mail", callback_data: "mail_mass", style: "danger" }],
+  ];
+
+  if (isAdminUser) {
+    rows.push(
+      [{ text: "📋 Client Emails", callback_data: "mail_emails", style: "primary" }],
+      [{ text: "✏️ Custom Message", callback_data: "mail_message", style: "primary" }]
+    );
+  }
+
+  rows.push([{ text: "🔙 Back to Menu", callback_data: "cmd_menu", style: "primary" }]);
+  return { inline_keyboard: rows };
+}
+
+function appealMenu(isAdminUser) {
+  const rows = [
+    [{ text: "🔴 Mass Appeal", callback_data: "appeal_mass", style: "danger" }],
+  ];
+
+  if (isAdminUser) {
+    rows.push(
+      [{ text: "📋 Appeal Emails", callback_data: "appeal_emails", style: "primary" }],
+      [{ text: "✏️ Appeal Message", callback_data: "appeal_message", style: "primary" }]
+    );
+  }
+
+  rows.push([{ text: "🔙 Back to Menu", callback_data: "cmd_menu", style: "primary" }]);
+  return { inline_keyboard: rows };
+}
+
+function premiumMenu() {
   return {
     inline_keyboard: [
       [{ text: "🟢 Give Premium", callback_data: "prem_give", style: "success" }],
       [{ text: "🔴 Revoke Premium", callback_data: "prem_revoke", style: "danger" }],
-      [{ text: "🔵 List Premium Users", callback_data: "prem_list", style: "primary" }],
+      [{ text: "🔵 List Premium", callback_data: "prem_list", style: "primary" }],
       [{ text: "🔵 Total Users", callback_data: "prem_total", style: "primary" }],
-      [{ text: "🔙 Back to Menu", callback_data: "cmd_menu", style: "primary" }],
+      [{ text: "🔙 Back", callback_data: "cmd_menu", style: "primary" }],
     ],
   };
 }
 
-function backToMenuKeyboard() {
+function backMenu() {
+  return {
+    inline_keyboard: [[{ text: "🔙 Back to Menu", callback_data: "cmd_menu", style: "primary" }]],
+  };
+}
+
+function contactCreator() {
   return {
     inline_keyboard: [
-      [{ text: "🔙 Back to Menu", callback_data: "cmd_menu", style: "primary" }],
+      [{ text: "📩 Contact Creator", url: `https://t.me/${CREATOR_USERNAME}`, style: "primary" }],
+      [{ text: "🔙 Back", callback_data: "cmd_menu", style: "primary" }],
     ],
   };
 }
 
-function contactCreatorKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        {
-          text: "📩 Contact Creator",
-          url: `https://t.me/${CREATOR_USERNAME}`,
-          style: "primary",
-        },
-      ],
-      [{ text: "🔙 Back to Menu", callback_data: "cmd_menu", style: "primary" }],
-    ],
-  };
+// ====================== TEXT HELPERS ======================
+function welcomeText(name) {
+  return `*${toSMC("APEX VOID BOT")}* ⚡\n\nWelcome, *${name || "User"}*\n\nYou have entered the void.\nUse the buttons below.`;
 }
 
-function confirmRevokeKeyboard(targetId) {
-  return {
-    inline_keyboard: [
-      [
-        { text: "✅ Yes, Revoke", callback_data: `prem_revoke_confirm_${targetId}`, style: "success" },
-        { text: "❌ Cancel", callback_data: "prem_revoke", style: "danger" },
-      ],
-    ],
-  };
+function menuText(userId) {
+  const role = getRole(userId);
+  let r = "Regular User";
+  if (role === "admin") r = "👑 Admin";
+  if (role === "premium") r = "⭐ Premium";
+  return `*${toSMC("APEX VOID MENU")}* ⚡\n\nRole: *${r}*\n\nSelect an option:`;
 }
 
-// ====================== MESSAGE BUILDERS ======================
-function getWelcomeText(firstName) {
-  const name = firstName || "User";
-  return (
-    `*${toSMC("APEX VOID BOT")}* ⚡\n\n` +
-    `Welcome, *${name}*\n\n` +
-    `You have entered the void.\n` +
-    `Use the buttons below to navigate.`
-  );
+function premiumRequired() {
+  return `*${toSMC("PREMIUM FEATURE")}* ⭐\n\nThis feature requires Premium access.\n\nContact the creator:\n@${CREATOR_USERNAME}`;
 }
 
-function getMenuText(userId) {
-  const role = getUserRole(userId);
-  let roleText = "Regular User";
-  if (role === "admin") roleText = "👑 Admin";
-  if (role === "premium") roleText = "⭐ Premium";
-
-  return (
-    `*${toSMC("APEX VOID MENU")}* ⚡\n\n` +
-    `Role: *${roleText}*\n\n` +
-    `Select an option below:`
-  );
-}
-
-function getPremiumRequiredText() {
-  return (
-    `*${toSMC("PREMIUM FEATURE")}* ⭐\n\n` +
-    `This feature requires Premium access.\n\n` +
-    `To get premium, contact the creator:\n` +
-    `@${CREATOR_USERNAME}`
-  );
-}
-
-// ====================== CORE HANDLERS ======================
-async function sendMenu(chatId, userId, firstName, isStart = false) {
-  const text = isStart ? getWelcomeText(firstName) : getMenuText(userId);
-  const keyboard = mainMenuKeyboard(userId);
-
-  if (WELCOME_IMAGE_URL) {
-    await sendPhoto(chatId, WELCOME_IMAGE_URL, text, keyboard);
-  } else {
-    await sendMessage(chatId, text, keyboard);
-  }
-}
-
-async function handlePremiumGive(chatId, userId) {
-  userStates.set(userId, { action: "waiting_prem_id" });
-  await sendMessage(
-    chatId,
-    `*${toSMC("GIVE PREMIUM")}*\n\nSend the Telegram User ID of the person you want to give Premium to.\n\nExample: \`123456789\``,
-    backToMenuKeyboard()
-  );
-}
-
-async function handlePremiumRevokeList(chatId) {
-  if (premiumUsers.size === 0) {
-    await sendMessage(
-      chatId,
-      `*${toSMC("REVOKE PREMIUM")}*\n\nNo premium users found.`,
-      premiumMenuKeyboard()
-    );
-    return;
-  }
-
-  let text = `*${toSMC("REVOKE PREMIUM")}*\n\nSelect a number to revoke:\n\n`;
-  let i = 1;
-  const map = [];
-
-  for (const [id, data] of premiumUsers) {
-    const remaining = daysRemaining(data.expiry);
-    text += `*${i}.* @${data.username || "unknown"} (ID: \`${id}\`)\n`;
-    text += `   Days left: ${remaining}\n\n`;
-    map.push(id);
-    i++;
-  }
-
-  // Store the ordered list temporarily
-  userStates.set(chatId, { action: "waiting_revoke_number", list: map });
-
-  await sendMessage(chatId, text, premiumMenuKeyboard());
-}
-
-async function handlePremiumList(chatId) {
-  if (premiumUsers.size === 0) {
-    await sendMessage(
-      chatId,
-      `*${toSMC("PREMIUM USERS")}*\n\nNo premium users at the moment.`,
-      premiumMenuKeyboard()
-    );
-    return;
-  }
-
-  let text = `*${toSMC("PREMIUM USERS")}*\n\n`;
-  let i = 1;
-
-  for (const [id, data] of premiumUsers) {
-    const remaining = daysRemaining(data.expiry);
-    const used = data.duration_days - remaining;
-
-    text += `━━━━━━━━━━━━━━━━\n`;
-    text += `*${i}.* @${data.username || "unknown"}\n`;
-    text += `ID: \`${id}\`\n`;
-    text += `Duration: ${data.duration_days} days\n`;
-    text += `Used: ${used} | Remaining: ${remaining}\n`;
-    text += `Expires: ${formatDate(data.expiry)}\n`;
-    i++;
-  }
-
-  text += `━━━━━━━━━━━━━━━━\nTotal: *${premiumUsers.size}* premium users`;
-
-  await sendMessage(chatId, text, {
-    inline_keyboard: [
-      [{ text: "🔄 Refresh", callback_data: "prem_list", style: "primary" }],
-      [{ text: "🔙 Back", callback_data: "cmd_prem", style: "primary" }],
-    ],
+// ====================== EMAIL MANAGEMENT HELPERS ======================
+function listEmailsText(title, list) {
+  if (list.length === 0) return `*${toSMC(title)}*\n\nNo emails saved yet.`;
+  let t = `*${toSMC(title)}*\n\n`;
+  list.forEach((e, i) => {
+    t += `${i + 1}. \`${e}\`\n`;
   });
-}
-
-async function handleTotalUsers(chatId) {
-  const total = users.size;
-  let text = `*${toSMC("TOTAL USERS")}*\n\nTotal users who started the bot: *${total}*\n\n`;
-
-  if (total > 0) {
-    text += `*Recent users:*\n`;
-    const recent = Array.from(users.values())
-      .sort((a, b) => b.joined_at - a.joined_at)
-      .slice(0, 10);
-
-    recent.forEach((u, idx) => {
-      text += `${idx + 1}. @${u.username || "unknown"} (\`${u.id}\`)\n`;
-    });
-  }
-
-  await sendMessage(chatId, text, {
-    inline_keyboard: [
-      [{ text: "🔄 Refresh", callback_data: "prem_total", style: "primary" }],
-      [{ text: "🔙 Back", callback_data: "cmd_prem", style: "primary" }],
-    ],
-  });
+  return t;
 }
 
 // ====================== MAIN HANDLER ======================
-export default async function handler(req) {
+module.exports = async function handler(req, res) {
   if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
+    return res.status(405).send("Method Not Allowed");
   }
 
   try {
-    const update = await req.json();
+    const update = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
 
-    // ========== MESSAGE HANDLER ==========
+    // ---------- MESSAGE ----------
     if (update.message) {
       const msg = update.message;
       const chatId = msg.chat.id;
@@ -375,175 +288,226 @@ export default async function handler(req) {
       const firstName = from.first_name || "User";
 
       registerUser(from);
-
-      // Check conversation state first
       const state = userStates.get(userId);
 
-      if (state && state.action === "waiting_prem_id") {
-        const targetId = parseInt(text);
-        if (isNaN(targetId)) {
-          await sendMessage(chatId, "❌ Invalid ID. Please send a valid numeric Telegram User ID.", backToMenuKeyboard());
-          return new Response("OK", { status: 200 });
-        }
-        userStates.set(userId, { action: "waiting_prem_days", targetId });
-        await sendMessage(
-          chatId,
-          `*${toSMC("GIVE PREMIUM")}*\n\nUser ID: \`${targetId}\`\n\nNow send the duration in days (1-30).\nDefault is 7 if you just send anything invalid.`,
-          backToMenuKeyboard()
-        );
-        return new Response("OK", { status: 200 });
-      }
-
-      if (state && state.action === "waiting_prem_days") {
-        let days = parseInt(text);
-        if (isNaN(days) || days < 1 || days > 30) days = 7;
-
-        const targetId = state.targetId;
-        const expiry = Date.now() + days * 24 * 60 * 60 * 1000;
-
-        // Try to get username from users map
-        const targetUser = users.get(targetId);
-        const username = targetUser ? targetUser.username : null;
-
-        premiumUsers.set(targetId, {
-          id: targetId,
-          username,
-          granted_at: Date.now(),
-          duration_days: days,
-          expiry,
-        });
-
-        userStates.delete(userId);
-
-        await sendMessage(
-          chatId,
-          `✅ *Premium Granted*\n\nUser: \`${targetId}\`\nDuration: *${days} days*\nExpires: ${formatDate(expiry)}`,
-          premiumMenuKeyboard()
-        );
-
-        // Notify the user if possible
-        try {
-          await sendMessage(
-            targetId,
-            `⭐ *You have received Premium access!*\n\nDuration: *${days} days*\nExpires: ${formatDate(expiry)}\n\nEnjoy the void.`
-          );
-        } catch (e) {}
-
-        return new Response("OK", { status: 200 });
-      }
-
-      if (state && state.action === "waiting_revoke_number") {
-        const num = parseInt(text);
-        const list = state.list || [];
-        if (isNaN(num) || num < 1 || num > list.length) {
-          await sendMessage(chatId, "❌ Invalid number. Please try again.", premiumMenuKeyboard());
-          return new Response("OK", { status: 200 });
-        }
-
-        const targetId = list[num - 1];
-        const data = premiumUsers.get(targetId);
-
-        userStates.delete(userId);
-
-        await sendMessage(
-          chatId,
-          `*Confirm Revoke*\n\nUser: @${data?.username || "unknown"} (\`${targetId}\`)\n\nAre you sure you want to revoke Premium?`,
-          confirmRevokeKeyboard(targetId)
-        );
-        return new Response("OK", { status: 200 });
-      }
-
-      // Commands
-      const command = text.split(" ")[0].toLowerCase().split("@")[0];
-
-      if (command === "/start") {
-        await sendMenu(chatId, userId, firstName, true);
-        return new Response("OK", { status: 200 });
-      }
-
-      if (command === "/menu") {
-        await sendMenu(chatId, userId, firstName, false);
-        return new Response("OK", { status: 200 });
-      }
-
-      // Admin commands
-      if (isAdmin(userId)) {
-        if (command === "/addprem") {
-          const parts = text.split(/\s+/);
-          const targetId = parseInt(parts[1]);
-          let days = parseInt(parts[2]) || 7;
-          if (days < 1 || days > 30) days = 7;
-
+      // ---- Multi-step states ----
+      if (state) {
+        // Give Premium – waiting for ID
+        if (state.action === "waiting_prem_id") {
+          const targetId = parseInt(text);
           if (isNaN(targetId)) {
-            await sendMessage(chatId, "Usage: `/addprem user_id [days]`");
-            return new Response("OK", { status: 200 });
+            await sendMessage(chatId, "❌ Invalid ID. Send a numeric Telegram User ID.", backMenu());
+            return res.status(200).send("OK");
           }
+          userStates.set(userId, { action: "waiting_prem_days", targetId });
+          await sendMessage(
+            chatId,
+            `*${toSMC("GIVE PREMIUM")}*\n\nID: \`${targetId}\`\n\nSend duration in days (1-30). Default 7.`,
+            backMenu()
+          );
+          return res.status(200).send("OK");
+        }
 
-          const expiry = Date.now() + days * 24 * 60 * 60 * 1000;
-          const targetUser = users.get(targetId);
-
+        if (state.action === "waiting_prem_days") {
+          let days = parseInt(text);
+          if (isNaN(days) || days < 1 || days > 30) days = 7;
+          const targetId = state.targetId;
+          const expiry = Date.now() + days * 86400000;
+          const u = users.get(targetId);
           premiumUsers.set(targetId, {
             id: targetId,
-            username: targetUser?.username || null,
+            username: u?.username || null,
             granted_at: Date.now(),
             duration_days: days,
             expiry,
           });
-
+          userStates.delete(userId);
           await sendMessage(
             chatId,
-            `✅ Premium granted to \`${targetId}\` for *${days} days*.`
+            `✅ Premium granted to \`${targetId}\` for *${days} days*.\nExpires: ${formatDate(expiry)}`,
+            premiumMenu()
           );
-
           try {
-            await sendMessage(
-              targetId,
-              `⭐ You received Premium for *${days} days*!`
-            );
+            await sendMessage(targetId, `⭐ You received Premium for *${days} days*!`);
           } catch (e) {}
-
-          return new Response("OK", { status: 200 });
+          return res.status(200).send("OK");
         }
 
-        if (command === "/delprem") {
+        // Add client emails
+        if (state.action === "add_client_emails") {
+          const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+          const valid = [];
+          const invalid = [];
+          for (const line of lines.slice(0, 10)) {
+            if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line)) valid.push(line.toLowerCase());
+            else invalid.push(line);
+          }
+          clientEmails = [...new Set([...clientEmails, ...valid])];
+          userStates.delete(userId);
+          let reply = `✅ Added *${valid.length}* email(s).`;
+          if (invalid.length) reply += `\n❌ Invalid: ${invalid.join(", ")}`;
+          await sendMessage(chatId, reply, sendMailMenu(true));
+          return res.status(200).send("OK");
+        }
+
+        // Add appeal emails
+        if (state.action === "add_appeal_emails") {
+          const lines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+          const valid = [];
+          const invalid = [];
+          for (const line of lines.slice(0, 10)) {
+            if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line)) valid.push(line.toLowerCase());
+            else invalid.push(line);
+          }
+          appealEmails = [...new Set([...appealEmails, ...valid])];
+          userStates.delete(userId);
+          let reply = `✅ Added *${valid.length}* appeal email(s).`;
+          if (invalid.length) reply += `\n❌ Invalid: ${invalid.join(", ")}`;
+          await sendMessage(chatId, reply, appealMenu(true));
+          return res.status(200).send("OK");
+        }
+
+        // Set custom message
+        if (state.action === "set_custom_message") {
+          if (text.length < 5) {
+            await sendMessage(chatId, "❌ Message too short. Try again.", backMenu());
+            return res.status(200).send("OK");
+          }
+          customMessage = text;
+          userStates.delete(userId);
+          await sendMessage(
+            chatId,
+            `✅ Custom message saved.\n\nPreview:\n${customMessage}`,
+            sendMailMenu(true)
+          );
+          return res.status(200).send("OK");
+        }
+
+        // Set appeal message
+        if (state.action === "set_appeal_message") {
+          if (text.length < 5) {
+            await sendMessage(chatId, "❌ Message too short. Try again.", backMenu());
+            return res.status(200).send("OK");
+          }
+          appealMessage = text;
+          userStates.delete(userId);
+          await sendMessage(
+            chatId,
+            `✅ Appeal message saved.\n\nPreview:\n${appealMessage}`,
+            appealMenu(true)
+          );
+          return res.status(200).send("OK");
+        }
+
+        // Delete client emails by numbers
+        if (state.action === "delete_client_emails") {
+          const nums = text.split(/[,\s]+/).map((n) => parseInt(n)).filter((n) => !isNaN(n));
+          const toRemove = nums
+            .filter((n) => n >= 1 && n <= clientEmails.length)
+            .map((n) => clientEmails[n - 1]);
+          clientEmails = clientEmails.filter((e) => !toRemove.includes(e));
+          userStates.delete(userId);
+          await sendMessage(chatId, `✅ Removed *${toRemove.length}* email(s).`, sendMailMenu(true));
+          return res.status(200).send("OK");
+        }
+
+        // Delete appeal emails by numbers
+        if (state.action === "delete_appeal_emails") {
+          const nums = text.split(/[,\s]+/).map((n) => parseInt(n)).filter((n) => !isNaN(n));
+          const toRemove = nums
+            .filter((n) => n >= 1 && n <= appealEmails.length)
+            .map((n) => appealEmails[n - 1]);
+          appealEmails = appealEmails.filter((e) => !toRemove.includes(e));
+          userStates.delete(userId);
+          await sendMessage(chatId, `✅ Removed *${toRemove.length}* appeal email(s).`, appealMenu(true));
+          return res.status(200).send("OK");
+        }
+      }
+
+      // ---- Commands ----
+      const cmd = text.split(" ")[0].toLowerCase().split("@")[0];
+
+      if (cmd === "/start") {
+        await sendMessage(chatId, welcomeText(firstName), mainMenu(userId));
+        return res.status(200).send("OK");
+      }
+
+      if (cmd === "/menu") {
+        await sendMessage(chatId, menuText(userId), mainMenu(userId));
+        return res.status(200).send("OK");
+      }
+
+      // Admin shortcut commands
+      if (isAdmin(userId)) {
+        if (cmd === "/addprem") {
+          const parts = text.split(/\s+/);
+          const targetId = parseInt(parts[1]);
+          let days = parseInt(parts[2]) || 7;
+          if (days < 1 || days > 30) days = 7;
+          if (isNaN(targetId)) {
+            await sendMessage(chatId, "Usage: `/addprem user_id [days]`");
+            return res.status(200).send("OK");
+          }
+          const expiry = Date.now() + days * 86400000;
+          const u = users.get(targetId);
+          premiumUsers.set(targetId, {
+            id: targetId,
+            username: u?.username || null,
+            granted_at: Date.now(),
+            duration_days: days,
+            expiry,
+          });
+          await sendMessage(chatId, `✅ Premium given to \`${targetId}\` for *${days}* days.`);
+          try {
+            await sendMessage(targetId, `⭐ You received Premium for *${days} days*!`);
+          } catch (e) {}
+          return res.status(200).send("OK");
+        }
+
+        if (cmd === "/delprem") {
           const targetId = parseInt(text.split(/\s+/)[1]);
           if (isNaN(targetId)) {
             await sendMessage(chatId, "Usage: `/delprem user_id`");
-            return new Response("OK", { status: 200 });
+            return res.status(200).send("OK");
           }
-
           if (premiumUsers.has(targetId)) {
             premiumUsers.delete(targetId);
             await sendMessage(chatId, `✅ Premium revoked from \`${targetId}\``);
             try {
-              await sendMessage(targetId, "❌ Your Premium access has been revoked.");
+              await sendMessage(targetId, "❌ Your Premium has been revoked.");
             } catch (e) {}
           } else {
             await sendMessage(chatId, "User is not premium.");
           }
-          return new Response("OK", { status: 200 });
+          return res.status(200).send("OK");
         }
 
-        if (command === "/listprem") {
-          await handlePremiumList(chatId);
-          return new Response("OK", { status: 200 });
+        if (cmd === "/listprem") {
+          if (premiumUsers.size === 0) {
+            await sendMessage(chatId, "No premium users.");
+          } else {
+            let t = `*${toSMC("PREMIUM USERS")}*\n\n`;
+            let i = 1;
+            for (const [id, p] of premiumUsers) {
+              t += `${i}. @${p.username || "?"} (\`${id}\`) – ${daysLeft(p.expiry)} days left\n`;
+              i++;
+            }
+            await sendMessage(chatId, t);
+          }
+          return res.status(200).send("OK");
         }
 
-        if (command === "/totalusers") {
-          await handleTotalUsers(chatId);
-          return new Response("OK", { status: 200 });
+        if (cmd === "/totalusers") {
+          await sendMessage(chatId, `Total users: *${users.size}*`);
+          return res.status(200).send("OK");
         }
       }
 
-      // Default
-      await sendMessage(
-        chatId,
-        "Use /start or /menu to open the control panel.",
-        mainMenuKeyboard(userId)
-      );
+      await sendMessage(chatId, "Use /start or /menu.", mainMenu(userId));
+      return res.status(200).send("OK");
     }
 
-    // ========== CALLBACK HANDLER ==========
+    // ---------- CALLBACK ----------
     if (update.callback_query) {
       const cb = update.callback_query;
       const chatId = cb.message.chat.id;
@@ -554,114 +518,406 @@ export default async function handler(req) {
       registerUser(cb.from);
       await answerCallback(cb.id);
 
-      // Clear any previous state when navigating menus
-      if (["cmd_start", "cmd_menu", "cmd_prem", "cmd_ban", "cmd_unban"].includes(data)) {
+      // Clear state on main navigation
+      if (["cmd_start", "cmd_menu", "cmd_sendmail", "cmd_appeal", "cmd_prem"].includes(data)) {
         userStates.delete(userId);
       }
 
       if (data === "cmd_start") {
-        await sendMenu(chatId, userId, firstName, true);
-        return new Response("OK", { status: 200 });
+        await sendMessage(chatId, welcomeText(firstName), mainMenu(userId));
+        return res.status(200).send("OK");
       }
 
       if (data === "cmd_menu") {
-        await sendMenu(chatId, userId, firstName, false);
-        return new Response("OK", { status: 200 });
+        await sendMessage(chatId, menuText(userId), mainMenu(userId));
+        return res.status(200).send("OK");
       }
 
-      // BAN / UNBAN - Premium gate
-      if (data === "cmd_ban" || data === "cmd_unban") {
-        const role = getUserRole(userId);
+      // ---- SEND MAIL ----
+      if (data === "cmd_sendmail") {
+        const role = getRole(userId);
         if (role === "regular") {
-          await sendMessage(chatId, getPremiumRequiredText(), contactCreatorKeyboard());
+          await sendMessage(chatId, premiumRequired(), contactCreator());
         } else {
-          // Premium or Admin - feature not implemented (as agreed)
-          const feature = data === "cmd_ban" ? "Ban" : "Unban";
           await sendMessage(
             chatId,
-            `*${toSMC(feature.toUpperCase())}*\n\nThis feature is not available yet.`,
-            backToMenuKeyboard()
+            `*${toSMC("SEND MAIL")}* 📧\n\nChoose an option:`,
+            sendMailMenu(isAdmin(userId))
           );
         }
-        return new Response("OK", { status: 200 });
+        return res.status(200).send("OK");
       }
 
-      // PREM BUTTON
+      // ---- APPEAL ----
+      if (data === "cmd_appeal") {
+        const role = getRole(userId);
+        if (role === "regular") {
+          await sendMessage(chatId, premiumRequired(), contactCreator());
+        } else {
+          await sendMessage(
+            chatId,
+            `*${toSMC("APPEAL")}* 📧\n\nChoose an option:`,
+            appealMenu(isAdmin(userId))
+          );
+        }
+        return res.status(200).send("OK");
+      }
+
+      // ---- MASS MAIL (Premium + Admin) ----
+      if (data === "mail_mass") {
+        if (!isAdmin(userId) && !isPremium(userId)) {
+          await sendMessage(chatId, premiumRequired(), contactCreator());
+          return res.status(200).send("OK");
+        }
+        if (!customMessage) {
+          await sendMessage(
+            chatId,
+            "❌ No custom message set by admin yet.",
+            sendMailMenu(isAdmin(userId))
+          );
+          return res.status(200).send("OK");
+        }
+        if (clientEmails.length === 0) {
+          await sendMessage(
+            chatId,
+            "❌ No client emails configured by admin yet.",
+            sendMailMenu(isAdmin(userId))
+          );
+          return res.status(200).send("OK");
+        }
+
+        await sendMessage(chatId, "⏳ Sending emails... please wait.");
+
+        const result = await sendBulkEmail(
+          clientEmails,
+          "Message from Apex Void",
+          customMessage
+        );
+
+        if (result.success) {
+          logs.successfulMails.push({
+            userId,
+            time: Date.now(),
+            count: clientEmails.length,
+          });
+          await sendMessage(
+            chatId,
+            `✅ *Mass Mail Sent Successfully!*\n\nRecipients: *${clientEmails.length}*\nStatus: Delivered`,
+            sendMailMenu(isAdmin(userId))
+          );
+        } else {
+          logs.failedMails.push({
+            userId,
+            time: Date.now(),
+            error: result.error,
+          });
+          await sendMessage(
+            chatId,
+            `❌ *Mass Mail Failed*\n\nError: ${result.error}\n\nPlease try again later or contact admin.`,
+            sendMailMenu(isAdmin(userId))
+          );
+        }
+        return res.status(200).send("OK");
+      }
+
+      // ---- MASS APPEAL ----
+      if (data === "appeal_mass") {
+        if (!isAdmin(userId) && !isPremium(userId)) {
+          await sendMessage(chatId, premiumRequired(), contactCreator());
+          return res.status(200).send("OK");
+        }
+        if (!appealMessage) {
+          await sendMessage(
+            chatId,
+            "❌ No appeal message set by admin yet.",
+            appealMenu(isAdmin(userId))
+          );
+          return res.status(200).send("OK");
+        }
+        if (appealEmails.length === 0) {
+          await sendMessage(
+            chatId,
+            "❌ No appeal emails configured by admin yet.",
+            appealMenu(isAdmin(userId))
+          );
+          return res.status(200).send("OK");
+        }
+
+        await sendMessage(chatId, "⏳ Sending appeal emails... please wait.");
+
+        const result = await sendBulkEmail(
+          appealEmails,
+          "Appeal from Apex Void",
+          appealMessage
+        );
+
+        if (result.success) {
+          logs.successfulAppeals.push({
+            userId,
+            time: Date.now(),
+            count: appealEmails.length,
+          });
+          await sendMessage(
+            chatId,
+            `✅ *Mass Appeal Sent Successfully!*\n\nRecipients: *${appealEmails.length}*\nStatus: Delivered`,
+            appealMenu(isAdmin(userId))
+          );
+        } else {
+          logs.failedAppeals.push({
+            userId,
+            time: Date.now(),
+            error: result.error,
+          });
+          await sendMessage(
+            chatId,
+            `❌ *Mass Appeal Failed*\n\nError: ${result.error}`,
+            appealMenu(isAdmin(userId))
+          );
+        }
+        return res.status(200).send("OK");
+      }
+
+      // ---- ADMIN: Client Emails management ----
+      if (data === "mail_emails" && isAdmin(userId)) {
+        await sendMessage(
+          chatId,
+          listEmailsText("CLIENT EMAILS", clientEmails) +
+            "\n\nOptions:",
+          {
+            inline_keyboard: [
+              [{ text: "🟢 Add Emails", callback_data: "mail_add_emails", style: "success" }],
+              [{ text: "🔴 Delete Emails", callback_data: "mail_del_emails", style: "danger" }],
+              [{ text: "🔙 Back", callback_data: "cmd_sendmail", style: "primary" }],
+            ],
+          }
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "mail_add_emails" && isAdmin(userId)) {
+        userStates.set(userId, { action: "add_client_emails" });
+        await sendMessage(
+          chatId,
+          "Send up to 10 client emails (one per line):\n\nExample:\nclient1@domain.com\nclient2@domain.com",
+          backMenu()
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "mail_del_emails" && isAdmin(userId)) {
+        if (clientEmails.length === 0) {
+          await sendMessage(chatId, "No emails to delete.", sendMailMenu(true));
+          return res.status(200).send("OK");
+        }
+        userStates.set(userId, { action: "delete_client_emails" });
+        await sendMessage(
+          chatId,
+          listEmailsText("CLIENT EMAILS", clientEmails) +
+            "\n\nEnter the number(s) to delete (e.g. 1,3):",
+          backMenu()
+        );
+        return res.status(200).send("OK");
+      }
+
+      // ---- ADMIN: Custom Message ----
+      if (data === "mail_message" && isAdmin(userId)) {
+        const preview = customMessage || "(not set)";
+        await sendMessage(
+          chatId,
+          `*${toSMC("CUSTOM MESSAGE")}*\n\nCurrent:\n${preview}`,
+          {
+            inline_keyboard: [
+              [{ text: "🟢 Set / Change Message", callback_data: "mail_set_message", style: "success" }],
+              [{ text: "🔴 Delete Message", callback_data: "mail_del_message", style: "danger" }],
+              [{ text: "🔙 Back", callback_data: "cmd_sendmail", style: "primary" }],
+            ],
+          }
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "mail_set_message" && isAdmin(userId)) {
+        userStates.set(userId, { action: "set_custom_message" });
+        await sendMessage(
+          chatId,
+          "Send the new custom message that will be emailed to all client emails:",
+          backMenu()
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "mail_del_message" && isAdmin(userId)) {
+        customMessage = "";
+        await sendMessage(chatId, "✅ Custom message deleted.", sendMailMenu(true));
+        return res.status(200).send("OK");
+      }
+
+      // ---- ADMIN: Appeal Emails ----
+      if (data === "appeal_emails" && isAdmin(userId)) {
+        await sendMessage(
+          chatId,
+          listEmailsText("APPEAL EMAILS", appealEmails) +
+            "\n\nOptions:",
+          {
+            inline_keyboard: [
+              [{ text: "🟢 Add Emails", callback_data: "appeal_add_emails", style: "success" }],
+              [{ text: "🔴 Delete Emails", callback_data: "appeal_del_emails", style: "danger" }],
+              [{ text: "🔙 Back", callback_data: "cmd_appeal", style: "primary" }],
+            ],
+          }
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "appeal_add_emails" && isAdmin(userId)) {
+        userStates.set(userId, { action: "add_appeal_emails" });
+        await sendMessage(
+          chatId,
+          "Send up to 10 appeal emails (one per line):",
+          backMenu()
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "appeal_del_emails" && isAdmin(userId)) {
+        if (appealEmails.length === 0) {
+          await sendMessage(chatId, "No emails to delete.", appealMenu(true));
+          return res.status(200).send("OK");
+        }
+        userStates.set(userId, { action: "delete_appeal_emails" });
+        await sendMessage(
+          chatId,
+          listEmailsText("APPEAL EMAILS", appealEmails) +
+            "\n\nEnter the number(s) to delete (e.g. 1,3):",
+          backMenu()
+        );
+        return res.status(200).send("OK");
+      }
+
+      // ---- ADMIN: Appeal Message ----
+      if (data === "appeal_message" && isAdmin(userId)) {
+        const preview = appealMessage || "(not set)";
+        await sendMessage(
+          chatId,
+          `*${toSMC("APPEAL MESSAGE")}*\n\nCurrent:\n${preview}`,
+          {
+            inline_keyboard: [
+              [{ text: "🟢 Set / Change Message", callback_data: "appeal_set_message", style: "success" }],
+              [{ text: "🔴 Delete Message", callback_data: "appeal_del_message", style: "danger" }],
+              [{ text: "🔙 Back", callback_data: "cmd_appeal", style: "primary" }],
+            ],
+          }
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "appeal_set_message" && isAdmin(userId)) {
+        userStates.set(userId, { action: "set_appeal_message" });
+        await sendMessage(
+          chatId,
+          "Send the new appeal message:",
+          backMenu()
+        );
+        return res.status(200).send("OK");
+      }
+
+      if (data === "appeal_del_message" && isAdmin(userId)) {
+        appealMessage = "";
+        await sendMessage(chatId, "✅ Appeal message deleted.", appealMenu(true));
+        return res.status(200).send("OK");
+      }
+
+      // ---- PREMIUM ----
       if (data === "cmd_prem") {
         if (isAdmin(userId)) {
-          await sendMessage(
-            chatId,
-            `*${toSMC("PREMIUM MANAGEMENT")}* ⭐\n\nChoose an option:`,
-            premiumMenuKeyboard()
-          );
+          await sendMessage(chatId, `*${toSMC("PREMIUM MANAGEMENT")}* ⭐`, premiumMenu());
         } else if (isPremium(userId)) {
-          const prem = premiumUsers.get(userId);
-          const remaining = daysRemaining(prem.expiry);
+          const p = premiumUsers.get(userId);
           await sendMessage(
             chatId,
-            `*${toSMC("YOUR PREMIUM")}* ⭐\n\nStatus: Active\nDays remaining: *${remaining}*\nExpires: ${formatDate(prem.expiry)}`,
-            backToMenuKeyboard()
+            `*${toSMC("YOUR PREMIUM")}* ⭐\n\nDays left: *${daysLeft(p.expiry)}*\nExpires: ${formatDate(p.expiry)}`,
+            backMenu()
           );
         } else {
-          await sendMessage(chatId, getPremiumRequiredText(), contactCreatorKeyboard());
+          await sendMessage(chatId, premiumRequired(), contactCreator());
         }
-        return new Response("OK", { status: 200 });
+        return res.status(200).send("OK");
       }
 
-      // ADMIN ONLY PREMIUM ACTIONS
       if (isAdmin(userId)) {
         if (data === "prem_give") {
-          await handlePremiumGive(chatId, userId);
-          return new Response("OK", { status: 200 });
+          userStates.set(userId, { action: "waiting_prem_id" });
+          await sendMessage(
+            chatId,
+            `*${toSMC("GIVE PREMIUM")}*\n\nSend the Telegram User ID:`,
+            backMenu()
+          );
+          return res.status(200).send("OK");
         }
 
         if (data === "prem_revoke") {
-          await handlePremiumRevokeList(chatId);
-          return new Response("OK", { status: 200 });
+          if (premiumUsers.size === 0) {
+            await sendMessage(chatId, "No premium users.", premiumMenu());
+            return res.status(200).send("OK");
+          }
+          let t = `*${toSMC("REVOKE PREMIUM")}*\n\n`;
+          let i = 1;
+          const list = [];
+          for (const [id, p] of premiumUsers) {
+            t += `*${i}.* @${p.username || "?"} (\`${id}\`) – ${daysLeft(p.expiry)}d left\n`;
+            list.push(id);
+            i++;
+          }
+          userStates.set(userId, { action: "waiting_revoke_number", list });
+          await sendMessage(chatId, t + "\nSend the number to revoke:", premiumMenu());
+          return res.status(200).send("OK");
         }
 
         if (data === "prem_list") {
-          await handlePremiumList(chatId);
-          return new Response("OK", { status: 200 });
+          if (premiumUsers.size === 0) {
+            await sendMessage(chatId, "No premium users.", premiumMenu());
+          } else {
+            let t = `*${toSMC("PREMIUM USERS")}*\n\n`;
+            let i = 1;
+            for (const [id, p] of premiumUsers) {
+              t += `${i}. @${p.username || "?"} (\`${id}\`)\n   ${daysLeft(p.expiry)} days left | Expires ${formatDate(p.expiry)}\n`;
+              i++;
+            }
+            await sendMessage(chatId, t, premiumMenu());
+          }
+          return res.status(200).send("OK");
         }
 
         if (data === "prem_total") {
-          await handleTotalUsers(chatId);
-          return new Response("OK", { status: 200 });
-        }
-
-        if (data.startsWith("prem_revoke_confirm_")) {
-          const targetId = parseInt(data.replace("prem_revoke_confirm_", ""));
-          if (premiumUsers.has(targetId)) {
-            premiumUsers.delete(targetId);
-            await sendMessage(
-              chatId,
-              `✅ Premium revoked from \`${targetId}\``,
-              premiumMenuKeyboard()
-            );
-            try {
-              await sendMessage(targetId, "❌ Your Premium access has been revoked by the admin.");
-            } catch (e) {}
-          } else {
-            await sendMessage(chatId, "User is no longer premium.", premiumMenuKeyboard());
-          }
-          return new Response("OK", { status: 200 });
+          let t = `*${toSMC("TOTAL USERS")}*\n\nTotal: *${users.size}*\n\n`;
+          const recent = Array.from(users.values())
+            .sort((a, b) => b.joined_at - a.joined_at)
+            .slice(0, 10);
+          recent.forEach((u, i) => {
+            t += `${i + 1}. @${u.username || "?"} (\`${u.id}\`)\n`;
+          });
+          await sendMessage(chatId, t, premiumMenu());
+          return res.status(200).send("OK");
         }
 
         if (data === "admin_logs") {
+          const s = logs.successfulMails.length;
+          const f = logs.failedMails.length;
+          const sa = logs.successfulAppeals.length;
+          const fa = logs.failedAppeals.length;
           await sendMessage(
             chatId,
-            `*${toSMC("BOT LOGS")}*\n\nLogs system is ready for future features.\nCurrently no mass-report activity is being tracked.`,
-            backToMenuKeyboard()
+            `*${toSMC("BOT LOGS")}*\n\n✅ Successful Mails: *${s}*\n❌ Failed Mails: *${f}*\n✅ Successful Appeals: *${sa}*\n❌ Failed Appeals: *${fa}*`,
+            backMenu()
           );
-          return new Response("OK", { status: 200 });
+          return res.status(200).send("OK");
         }
       }
     }
 
-    return new Response("OK", { status: 200 });
+    return res.status(200).send("OK");
   } catch (err) {
     console.error("Webhook error:", err);
-    return new Response("Internal Server Error", { status: 500 });
+    return res.status(500).send("Internal Server Error");
   }
-}
+};
